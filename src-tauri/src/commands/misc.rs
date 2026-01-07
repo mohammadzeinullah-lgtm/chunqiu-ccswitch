@@ -4,6 +4,9 @@ use crate::init_status::InitErrorPayload;
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
 
+use futures::StreamExt;
+use tokio::io::AsyncWriteExt;
+
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -24,6 +27,154 @@ pub async fn open_external(app: AppHandle, url: String) -> Result<bool, String> 
         .map_err(|e| format!("打开链接失败: {e}"))?;
 
     Ok(true)
+}
+
+/// 获取当前运行平台（用于前端按系统选择安装包）。
+///
+/// 返回值与前端 `Pan123Platform` 对齐：`windows` / `macos` / `linux`。
+#[tauri::command]
+pub async fn get_runtime_platform() -> Result<String, String> {
+    Ok(std::env::consts::OS.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct DownloadAndOpenResult {
+    filePath: String,
+}
+
+fn sanitize_download_file_name(raw: &str) -> String {
+    let fallback = "aicodewith-update.bin";
+    let name = std::path::Path::new(raw)
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or(fallback);
+
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => out.push('_'),
+            _ => out.push(ch),
+        }
+    }
+
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.chars().take(120).collect()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn try_start_windows_msi_install(msi_path: &std::path::Path) -> Result<(), String> {
+    use std::process::Command;
+
+    // 业务约束：更新按钮触发的安装应尽量减少交互，避免“向导式安装页”打断用户。
+    // 技术约束：MSI 本身无法在双击时强制静默；但应用内触发安装可以通过 `msiexec` 参数做到。
+    Command::new("msiexec")
+        .arg("/i")
+        .arg(msi_path)
+        .arg("/passive")
+        .arg("/norestart")
+        // 配合 `src-tauri/wix/per-user-main.wxs` 的自定义动作：安装完成后自动启动应用。
+        .arg("AUTOLAUNCHAPP=1")
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| format!("启动 Windows 安装器失败: {e}"))?;
+
+    Ok(())
+}
+
+/// 下载网盘安装包并打开（触发系统安装流程）
+#[tauri::command]
+pub async fn download_and_open_update_package(
+    app: AppHandle,
+    url: String,
+    #[allow(non_snake_case)] fileName: String,
+) -> Result<DownloadAndOpenResult, String> {
+    let parsed = url::Url::parse(&url).map_err(|e| format!("无效的下载链接: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return Err("不支持的下载链接协议".to_string()),
+    }
+
+    // 安全兜底：仅允许从 123 云盘下载域名拉取安装包，避免被误用为“任意下载并打开”能力。
+    if let Some(host) = parsed.host_str() {
+        let host = host.to_lowercase();
+        let trusted = host.ends_with(".cjjd19.com")
+            || host.ends_with(".123pan.com")
+            || host.ends_with(".123865.com");
+        if !trusted {
+            return Err("下载链接域名不受信任".to_string());
+        }
+    } else {
+        return Err("下载链接缺少域名".to_string());
+    }
+
+    let file_name = sanitize_download_file_name(&fileName);
+    let cache_dir = std::env::temp_dir().join("aicodewith-updates");
+    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("创建缓存目录失败: {e}"))?;
+
+    let final_path = cache_dir.join(&file_name);
+    let temp_path = cache_dir.join(format!("{file_name}.partial"));
+
+    let client = reqwest::Client::builder()
+        .user_agent(format!("AI-Code-With/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("创建下载客户端失败: {e}"))?;
+
+    let res = client
+        .get(parsed)
+        .send()
+        .await
+        .map_err(|e| format!("下载请求失败: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("下载响应异常: {e}"))?;
+
+    let mut file = tokio::fs::File::create(&temp_path)
+        .await
+        .map_err(|e| format!("创建下载文件失败: {e}"))?;
+
+    let mut stream = res.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|e| format!("读取下载数据失败: {e}"))?;
+        file.write_all(&bytes)
+            .await
+            .map_err(|e| format!("写入下载文件失败: {e}"))?;
+    }
+
+    file.flush()
+        .await
+        .map_err(|e| format!("刷新下载文件失败: {e}"))?;
+    drop(file);
+
+    if let Err(e) = tokio::fs::rename(&temp_path, &final_path).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(format!("保存下载文件失败: {e}"));
+    }
+
+    // Windows 下如果是 MSI，则用 msiexec 的 passive 模式启动安装，以避免向导式安装页面。
+    #[cfg(target_os = "windows")]
+    {
+        if final_path
+            .extension()
+            .and_then(|v| v.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("msi"))
+        {
+            try_start_windows_msi_install(&final_path)?;
+            return Ok(DownloadAndOpenResult {
+                filePath: final_path.to_string_lossy().to_string(),
+            });
+        }
+    }
+
+    app.opener()
+        .open_path(final_path.to_string_lossy().to_string(), None::<String>)
+        .map_err(|e| format!("打开安装包失败: {e}"))?;
+
+    Ok(DownloadAndOpenResult {
+        filePath: final_path.to_string_lossy().to_string(),
+    })
 }
 
 /// 检查更新

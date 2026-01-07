@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AI Code With",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "identifier": "com.aicodewith.desktop",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:3007",
+    "devUrl": "http://127.0.0.1:3007",
     "beforeDevCommand": "pnpm run dev:renderer",
     "beforeBuildCommand": "pnpm run build:renderer"
   },
@@ -13,13 +13,14 @@
     "windows": [
       {
         "label": "main",
-        "title": "",
+        "title": "AiCodeWith",
         "titleBarStyle": "Overlay",
         "width": 1000,
         "height": 650,
         "minWidth": 900,
         "minHeight": 600,
         "resizable": true,
+        "devtools": false,
         "fullscreen": false,
         "center": true
       }
@@ -45,7 +46,12 @@
     ],
     "windows": {
       "wix": {
-        "template": "wix/per-user-main.wxs"
+        "template": "wix/per-user-main.wxs",
+        "language": {
+          "zh-CN": {
+            "localePath": "wix/locales/zh-CN.wxl"
+          }
+        }
       }
     },
     "macOS": {
@@ -59,9 +65,9 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM4MDI4QzlBNTczOTI4RTMKUldUaktEbFhtb3dDeUM5US9kT0FmdGR5Ti9vQzcwa2dTMlpibDVDUmQ2M0VGTzVOWnd0SGpFVlEK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQyREYwRjM5Q0FCOEU0RTkKUldUcDVMaktPUS9mMHVsK0djWVBSN1E3MWZnYzhrclFWSXhadytacndON0VtSjZZdjBsWVhtejYK",
       "endpoints": [
-        "https://github.com/XiaoYanKongLing/chunqiu-ccswitch/releases/latest/download/latest.json"
+        "https://github.com/Bianshumeng/aicodewith-cc-switch/releases/latest/download/latest.json"
       ]
     }
   }
